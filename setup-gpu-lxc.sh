@@ -24,21 +24,12 @@ if ! command -v nvidia-smi &> /dev/null; then
     exit 1
 fi
 
-echo "NVIDIA GPU detected:"
+echo "NVIDIA GPU detected on host:"
 nvidia-smi --query-gpu=name --format=csv,noheader
-
-# Prompt for NVIDIA .run installer URL
-read -p "Enter NVIDIA .run installer URL (default: 580.119.02): " NVIDIA_URL
-NVIDIA_URL=${NVIDIA_URL:-https://us.download.nvidia.com/XFree86/Linux-x86_64/580.119.02/NVIDIA-Linux-x86_64-580.119.02.run}
-RUNFILE="NVIDIA-Linux-x86_64-580.119.02.run"
 
 # List containers
 echo -e "\nAvailable LXC containers:"
-pct list | awk 'NR>1 {print $1" "$2}' | while read ID NAME; do
-    if [[ $ID != "VMID" ]]; then
-        echo "  $ID: $NAME"
-    fi
-done
+pct list | awk 'NR>1 {printf "  %-8s %s\n", $1, $3}'
 
 read -p "Enter LXC container ID to configure: " CTID
 
@@ -50,17 +41,36 @@ fi
 CTNAME=$(pct list | awk -v id=$CTID '$1==id {print $2}')
 echo "Configuring container: $CTID ($CTNAME)"
 
-# Download NVIDIA driver to container
-echo -e "\n=== Downloading NVIDIA driver to container ==="
-pct push $CTID $NVIDIA_URL $RUNFILE -y
-pct exec $CTID -- bash -c "chmod +x $RUNFILE"
+# Check if container is running
+CONTAINER_RUNNING=false
+if pct status $CTID | grep -q "running"; then
+    CONTAINER_RUNNING=true
+    echo "Container is currently running"
+else
+    echo "Container is stopped"
+fi
+
+# Check if GPU is already working in container
+echo -e "\n=== Checking current GPU status in container ==="
+GPU_ALREADY_WORKING=false
+
+if $CONTAINER_RUNNING; then
+    if pct exec $CTID -- nvidia-smi &> /dev/null; then
+        echo "✓ GPU is already accessible and working in container!"
+        GPU_ALREADY_WORKING=true
+    else
+        echo "✗ GPU not currently accessible in container"
+    fi
+else
+    echo "Container stopped - will check configuration"
+fi
 
 # Get NVIDIA device nodes from host
-echo "=== Detecting NVIDIA device nodes ==="
+echo -e "\n=== Detecting NVIDIA device nodes on host ==="
 NVIDIA_DEVS=$(ls -la /dev/nvidia* /dev/nvidia-caps/* 2>/dev/null | grep -E 'nvidia[0-9]+|nvidiactl|nvidia-uvm|nvidia-uvm-tools|nvidia-cap[0-9]+' | awk '{print $9","$4","$5}' | sort -u)
 
 if [[ -z "$NVIDIA_DEVS" ]]; then
-    echo "ERROR: No NVIDIA devices found"
+    echo "ERROR: No NVIDIA devices found on host"
     exit 1
 fi
 
@@ -71,35 +81,126 @@ echo "$NVIDIA_DEVS"
 MAJORS=$(echo "$NVIDIA_DEVS" | cut -d, -f3 | cut -d: -f1 | sort -u | tr '\n' ' ')
 echo "Major device numbers: $MAJORS"
 
-# Stop container for config changes
-echo -e "\n=== Stopping container for configuration ==="
-pct stop $CTID
-
-# Backup and modify LXC config
+# Check existing LXC config
 CONFIG="/etc/pve/lxc/$CTID.conf"
-cp "$CONFIG" "${CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
+CONFIG_NEEDS_UPDATE=false
 
-cat >> "$CONFIG" << EOF
+echo -e "\n=== Checking existing LXC configuration ==="
+if grep -q "NVIDIA GPU Passthrough" "$CONFIG" 2>/dev/null; then
+    echo "✓ GPU passthrough configuration already exists in LXC config"
+    
+    # Check if all required devices are present
+    MISSING_DEVICES=false
+    while IFS=',' read -r DEV PERMS MAJOR_MINOR; do
+        if [[ -n "$DEV" ]]; then
+            NAME=$(basename "$DEV")
+            if ! grep -q "lxc.mount.entry.*$NAME" "$CONFIG"; then
+                echo "✗ Missing device mount: $NAME"
+                MISSING_DEVICES=true
+            fi
+        fi
+    done <<< "$NVIDIA_DEVS"
+    
+    if $MISSING_DEVICES; then
+        echo "Some devices are missing from config - will update"
+        CONFIG_NEEDS_UPDATE=true
+    else
+        echo "✓ All GPU devices are configured"
+    fi
+else
+    echo "✗ No GPU passthrough configuration found"
+    CONFIG_NEEDS_UPDATE=true
+fi
+
+# Update config if needed
+if $CONFIG_NEEDS_UPDATE; then
+    echo -e "\n=== Updating LXC configuration ==="
+    
+    # Stop container if running
+    if $CONTAINER_RUNNING; then
+        echo "Stopping container for configuration changes..."
+        pct stop $CTID
+        CONTAINER_RUNNING=false
+    fi
+    
+    # Backup config
+    cp "$CONFIG" "${CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
+    echo "Created config backup"
+    
+    # Remove old GPU config if exists
+    sed -i '/# NVIDIA GPU Passthrough/,/^$/d' "$CONFIG"
+    
+    # Add new GPU config
+    cat >> "$CONFIG" << EOF
 
 # NVIDIA GPU Passthrough
 lxc.cgroup2.devices.allow: ${MAJORS// / } rwm
 EOF
 
-# Add device mounts
-while IFS=',' read -r DEV PERMS MAJOR_MINOR; do
-    if [[ -n "$DEV" ]]; then
-        MAJOR=$(echo "$MAJOR_MINOR" | cut -d: -f1)
-        NAME=$(basename "$DEV")
-        echo "lxc.mount.entry: /dev/$NAME dev/$NAME none bind,optional,create=file" >> "$CONFIG"
+    # Add device mounts
+    while IFS=',' read -r DEV PERMS MAJOR_MINOR; do
+        if [[ -n "$DEV" ]]; then
+            NAME=$(basename "$DEV")
+            echo "lxc.mount.entry: /dev/$NAME dev/$NAME none bind,optional,create=file" >> "$CONFIG"
+        fi
+    done <<< "$NVIDIA_DEVS"
+    
+    echo "✓ LXC config updated: $CONFIG"
+else
+    echo -e "\n✓ LXC configuration is already correct - no changes needed"
+fi
+
+# Check if NVIDIA drivers/toolkit need installation in container
+NEEDS_DRIVER_INSTALL=false
+NEEDS_TOOLKIT_INSTALL=false
+
+if ! $CONTAINER_RUNNING; then
+    echo -e "\n=== Starting container to check software installation ==="
+    pct start $CTID
+    sleep 3
+    CONTAINER_RUNNING=true
+fi
+
+echo -e "\n=== Checking NVIDIA software in container ==="
+
+# Check for nvidia-smi
+if pct exec $CTID -- which nvidia-smi &> /dev/null; then
+    echo "✓ NVIDIA drivers already installed in container"
+else
+    echo "✗ NVIDIA drivers not found in container"
+    NEEDS_DRIVER_INSTALL=true
+fi
+
+# Check for nvidia-container-toolkit
+if pct exec $CTID -- which nvidia-container-runtime &> /dev/null; then
+    echo "✓ NVIDIA Container Toolkit already installed"
+else
+    echo "✗ NVIDIA Container Toolkit not found"
+    NEEDS_TOOLKIT_INSTALL=true
+fi
+
+# Install missing components
+if $NEEDS_DRIVER_INSTALL || $NEEDS_TOOLKIT_INSTALL; then
+    echo -e "\n=== Installing missing NVIDIA components ==="
+    
+    if $NEEDS_DRIVER_INSTALL; then
+        # Prompt for NVIDIA .run installer URL
+        read -p "Enter NVIDIA .run installer URL (default: 580.119.02): " NVIDIA_URL
+        NVIDIA_URL=${NVIDIA_URL:-https://us.download.nvidia.com/XFree86/Linux-x86_64/580.119.02/NVIDIA-Linux-x86_64-580.119.02.run}
+        RUNFILE="NVIDIA-Linux-x86_64-580.119.02.run"
+        
+        echo "Downloading NVIDIA driver to container..."
+        pct push $CTID $NVIDIA_URL $RUNFILE -y
+        pct exec $CTID -- bash -c "chmod +x $RUNFILE"
+        
+        echo "Installing NVIDIA driver (without kernel modules)..."
+        pct exec $CTID -- bash -c "cd /root && ./$RUNFILE --no-kernel-modules --no-drm -a -s || true"
+        echo "✓ NVIDIA driver installed"
     fi
-done <<< "$NVIDIA_DEVS"
-
-echo "LXC config updated: $CONFIG"
-
-# Install NVIDIA Container Toolkit inside container
-echo -e "\n=== Installing NVIDIA Container Toolkit in container ==="
-pct start $CTID
-pct exec $CTID -- bash -c "
+    
+    if $NEEDS_TOOLKIT_INSTALL; then
+        echo "Installing NVIDIA Container Toolkit..."
+        pct exec $CTID -- bash -c "
 apt update && apt install -y gpg curl
 
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
@@ -110,21 +211,57 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
 apt update
 apt install -y nvidia-container-toolkit
 
-# Install NVIDIA driver WITHOUT kernel modules (host has them)
-cd /root && ./$RUNFILE --no-kernel-modules --no-drm -a -s || true
-
 # Configure nvidia-container-runtime
 sed -i 's/no-cgroups = false/no-cgroups = true/' /etc/nvidia-container-runtime/config.toml
 systemctl restart docker || true
 "
+        echo "✓ NVIDIA Container Toolkit installed"
+    fi
+else
+    echo -e "\n✓ All required software is already installed"
+fi
 
-echo -e "\n=== GPU Passthrough Setup Complete! ==="
+# Prompt for restart if config changed
+if $CONFIG_NEEDS_UPDATE; then
+    echo -e "\n=== Configuration changes were made ==="
+    read -p "Container restart required for changes to take effect. Restart now? (y/n): " RESTART_CHOICE
+    
+    if [[ "$RESTART_CHOICE" =~ ^[Yy]$ ]]; then
+        echo "Restarting container..."
+        pct stop $CTID
+        sleep 2
+        pct start $CTID
+        sleep 3
+        echo "✓ Container restarted"
+    else
+        echo "Skipping restart. You'll need to restart manually for changes to take effect."
+    fi
+fi
+
+# Verify GPU access
+echo -e "\n=== Verifying GPU Access ==="
+read -p "Run nvidia-smi in container to verify GPU access? (y/n): " VERIFY_CHOICE
+
+if [[ "$VERIFY_CHOICE" =~ ^[Yy]$ ]]; then
+    echo -e "\n--- Running nvidia-smi in container ---"
+    if pct exec $CTID -- nvidia-smi; then
+        echo -e "\n✓ GPU verification successful!"
+    else
+        echo -e "\n✗ GPU verification failed. You may need to restart the container."
+    fi
+fi
+
+echo -e "\n=== Setup Complete! ==="
 echo ""
-echo "Container $CTID ($CTNAME) now has NVIDIA GPU access"
+if $GPU_ALREADY_WORKING && ! $CONFIG_NEEDS_UPDATE; then
+    echo "✓ GPU was already working - no changes were needed"
+else
+    echo "✓ Container $CTID ($CTNAME) is configured for NVIDIA GPU access"
+fi
 echo ""
-echo "Test inside container:"
+echo "Test commands:"
 echo "  pct enter $CTID"
+echo "  nvidia-smi"
 echo "  docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi"
 echo ""
-echo "Config backup: ${CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
 echo "Done!"
