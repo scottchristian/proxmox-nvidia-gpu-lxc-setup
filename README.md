@@ -1,7 +1,7 @@
 # Proxmox NVIDIA GPU LXC Passthrough Setup
 
-[![GitHub stars](https://img.shields.io/github/stars/scottchristian/proxmox-gpu-lxc-setup)](https://github.com/scottchristian/proxmox-gpu-lxc-setup/stars)
-[![GitHub issues](https://img.shields.io/github/issues/scottchristian/proxmox-gpu-lxc-setup)](https://github.com/scottchristian/proxmox-gpu-lxc-setup/issues)
+[![GitHub stars](https://img.shields.io/github/stars/scottchristian/proxmox-nvidia-gpu-lxc-setup)](https://github.com/scottchristian/proxmox-nvidia-gpu-lxc-setup/stars)
+[![GitHub issues](https://img.shields.io/github/issues/scottchristian/proxmox-nvidia-gpu-lxc-setup)](https://github.com/scottchristian/proxmox-nvidia-gpu-lxc-setup/issues)
 
 **One-command NVIDIA GPU passthrough for Proxmox LXC containers!**
 
