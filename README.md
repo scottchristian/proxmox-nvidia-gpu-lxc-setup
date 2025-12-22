@@ -14,14 +14,18 @@
 - ✅ Config backups with timestamps
 
 ## Usage
+On the proxmox host, pull the script and then run it
 ```
 chmod +x setup-gpu-lxc.sh
 ./setup-gpu-lxc.sh
 ```
+It should prompt you for a link to a NVIDIA driver to use and an LXC container to share the GPU with. Once complete, you can then move on to testing it
 
 ## Test
 ```
+# Enter into the LXC container (you can also just go to the console of it in the Proxmox interface
 pct enter <CTID>
+# Then run the following inside the container, which should present you with the GPU stats, and if so, then you have successfully shared the GPU resource
 nvidia-smi
 ```
 
