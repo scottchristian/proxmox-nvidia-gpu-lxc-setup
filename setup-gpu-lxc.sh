@@ -18,9 +18,17 @@ if ! command -v pveversion &> /dev/null; then
     exit 1
 fi
 
+# Check for NVIDIA GPU hardware
+echo "Checking for NVIDIA GPU hardware..."
+if ! lspci -n | grep -q "10de:"; then
+    echo "ERROR: No NVIDIA GPU hardware detected on this machine."
+    exit 1
+fi
+echo "✓ NVIDIA GPU hardware detected."
+
 # Get NVIDIA device info
-if ! command -v nvidia-smi &> /dev/null; then
-    echo "NVIDIA drivers not detected on Proxmox host."
+if ! command -v nvidia-smi &> /dev/null || ! [ -f /proc/driver/nvidia/version ]; then
+    echo "NVIDIA drivers not detected or not functioning on Proxmox host."
     read -p "Would you like to install them now? (y/n): " INSTALL_HOST_DRIVERS
     if [[ "$INSTALL_HOST_DRIVERS" =~ ^[Yy]$ ]]; then
         echo "Choose installation method:"
@@ -58,8 +66,8 @@ if ! command -v nvidia-smi &> /dev/null; then
                 exit 1
                 ;;
         esac
-        # Re-check for nvidia-smi
-        if ! command -v nvidia-smi &> /dev/null; then
+        # Re-check for nvidia-smi and driver
+        if ! command -v nvidia-smi &> /dev/null || ! [ -f /proc/driver/nvidia/version ]; then
             echo "ERROR: NVIDIA drivers installation failed or requires a reboot."
             exit 1
         fi
