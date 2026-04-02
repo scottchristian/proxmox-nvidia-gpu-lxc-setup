@@ -14,8 +14,9 @@
 - ✅ Config backups with timestamps
 
 ## Usage
-On the proxmox host, pull the script and then run it
-```
+On the proxmox host, download and run the script:
+```bash
+wget https://raw.githubusercontent.com/scottchristian/proxmox-nvidia-gpu-lxc-setup/refs/heads/main/setup-gpu-lxc.sh
 chmod +x setup-gpu-lxc.sh
 ./setup-gpu-lxc.sh
 ```

@@ -20,8 +20,53 @@ fi
 
 # Get NVIDIA device info
 if ! command -v nvidia-smi &> /dev/null; then
-    echo "ERROR: NVIDIA drivers not detected. Install first with: apt install nvidia-driver"
-    exit 1
+    echo "NVIDIA drivers not detected on Proxmox host."
+    read -p "Would you like to install them now? (y/n): " INSTALL_HOST_DRIVERS
+    if [[ "$INSTALL_HOST_DRIVERS" =~ ^[Yy]$ ]]; then
+        echo "Choose installation method:"
+        echo "1) Add repository and install (Recommended for Proxmox/Debian)"
+        echo "2) Download and install latest .run file"
+        read -p "Selection [1-2]: " INSTALL_METHOD
+        
+        case $INSTALL_METHOD in
+            1)
+                echo "Adding non-free repositories and installing nvidia-driver..."
+                # Add contrib and non-free for Debian (Proxmox is based on Debian)
+                apt update && apt install -y software-properties-common
+                add-apt-repository -y contrib non-free-firmware || true
+                # Fallback for older Debian/Proxmox versions if add-apt-repository fails
+                if ! grep -q "non-free-firmware" /etc/apt/sources.list; then
+                    sed -i 's/main/main contrib non-free non-free-firmware/g' /etc/apt/sources.list
+                fi
+                apt update
+                apt install -y pve-headers nvidia-driver
+                echo "✓ Drivers installed via repository. A reboot is highly recommended."
+                ;;
+            2)
+                read -p "Enter NVIDIA .run installer URL (default: 580.119.02): " NVIDIA_URL
+                NVIDIA_URL=${NVIDIA_URL:-https://us.download.nvidia.com/XFree86/Linux-x86_64/580.119.02/NVIDIA-Linux-x86_64-580.119.02.run}
+                RUNFILE="NVIDIA-Linux-host-x86_64.run"
+                echo "Downloading NVIDIA driver..."
+                curl -L "$NVIDIA_URL" -o "/tmp/$RUNFILE"
+                chmod +x "/tmp/$RUNFILE"
+                echo "Installing NVIDIA driver..."
+                /tmp/$RUNFILE -a -s
+                echo "✓ Drivers installed via .run file. A reboot is highly recommended."
+                ;;
+            *)
+                echo "Invalid selection. Exiting."
+                exit 1
+                ;;
+        esac
+        # Re-check for nvidia-smi
+        if ! command -v nvidia-smi &> /dev/null; then
+            echo "ERROR: NVIDIA drivers installation failed or requires a reboot."
+            exit 1
+        fi
+    else
+        echo "Drivers must be installed on the host first. Exiting."
+        exit 1
+    fi
 fi
 
 echo "NVIDIA GPU detected on host:"
